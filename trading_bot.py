@@ -1,15 +1,17 @@
-trading_bot.py
-""" AGENTE TRADING BTC
-Binance - Paper Trading
-Estrategia EMA 20 / EMA 50
-"""
-
 import time
-import pandas as pd
-import ccxt
+import csv
+import os
+from datetime import datetime, timezone
 
-# CONFIGURACIÓN
+import ccxt
+import pandas as pd
+
+# =====================================
+# CONFIGURACION GENERAL
+# =====================================
+
 SYMBOL = "BTC/USDT"
+
 TIMEFRAME_TREND = "15m"
 TIMEFRAME_ENTRY = "5m"
 
@@ -19,12 +21,22 @@ RISK_PERCENT = 0.01
 STOP_LOSS_PERCENT = 0.02
 TAKE_PROFIT_PERCENT = 0.04
 
-# CONEXIÓN PÚBLICA A BINANCE
+MAX_POSITION_PERCENT = 0.50
+
+TRADE_HISTORY = "trades.csv"
+
+# =====================================
+# BINANCE: SOLO CONSULTA PUBLICA
+# =====================================
+
 exchange = ccxt.binance({
     "enableRateLimit": True
 })
 
+# =====================================
 # CARTERA SIMULADA
+# =====================================
+
 balance = INITIAL_BALANCE
 btc_balance = 0.0
 position = None
@@ -41,56 +53,95 @@ def get_data(timeframe):
     df = pd.DataFrame(
         candles,
         columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume"
+            "timestamp", "open", "high",
+            "low", "close", "volume"
         ]
     )
 
     df["ema20"] = df["close"].ewm(
-        span=20,
-        adjust=False
+        span=20, adjust=False
     ).mean()
 
     df["ema50"] = df["close"].ewm(
-        span=50,
-        adjust=False
+        span=50, adjust=False
     ).mean()
 
     return df
 
+
+# =====================================
+# HISTORIAL
+# =====================================
+
+def save_trade(action, price, amount, profit=0):
+
+    exists = os.path.exists(TRADE_HISTORY)
+
+    with open(
+        TRADE_HISTORY,
+        "a",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.writer(file)
+
+        if not exists:
+            writer.writerow([
+                "fecha", "accion",
+                "precio", "cantidad_btc",
+                "resultado_usdt"
+            ])
+
+        writer.writerow([
+            datetime.now(timezone.utc).isoformat(),
+            action,
+            round(price, 2),
+            round(amount, 8),
+            round(profit, 2)
+        ])
+
+
+# =====================================
+# ANALISIS DEL MERCADO
+# =====================================
 
 def analyze_market():
 
     trend = get_data(TIMEFRAME_TREND)
     entry = get_data(TIMEFRAME_ENTRY)
 
-    last_trend = trend.iloc[-2]
-    last_entry = entry.iloc[-2]
+    # Ultima vela cerrada
+    trend_candle = trend.iloc[-2]
+    entry_candle = entry.iloc[-2]
 
     bullish = (
-        last_trend["ema20"] > last_trend["ema50"]
+        trend_candle["ema20"] >
+        trend_candle["ema50"]
     )
 
     bearish = (
-        last_trend["ema20"] < last_trend["ema50"]
+        trend_candle["ema20"] <
+        trend_candle["ema50"]
     )
 
     entry_signal = (
-        last_entry["ema20"] > last_entry["ema50"]
+        entry_candle["ema20"] >
+        entry_candle["ema50"]
     )
 
     if bullish and entry_signal:
-        return "BUY", float(last_entry["close"])
+        return "BUY", float(entry_candle["close"])
 
     if bearish:
-        return "SELL", float(last_entry["close"])
+        return "SELL", float(entry_candle["close"])
 
-    return "HOLD", float(last_entry["close"])
+    return "HOLD", float(entry_candle["close"])
 
+
+# =====================================
+# ABRIR OPERACION SIMULADA
+# =====================================
 
 def open_position(price):
 
@@ -102,11 +153,15 @@ def open_position(price):
 
     btc_amount = risk_amount / stop_distance
 
-    cost = btc_amount * price
+    # Limitar el capital comprometido
+    max_cost = balance * MAX_POSITION_PERCENT
 
-    if cost > balance:
-        btc_amount = balance / price
-        cost = btc_amount * price
+    btc_amount = min(
+        btc_amount,
+        max_cost / price
+    )
+
+    cost = btc_amount * price
 
     if btc_amount <= 0:
         return
@@ -121,8 +176,15 @@ def open_position(price):
         "target": price * (1 + TAKE_PROFIT_PERCENT)
     }
 
-    print(f"COMPRA SIMULADA: {price:.2f}")
+    save_trade("BUY", price, btc_amount)
 
+    print(f"COMPRA SIMULADA: {price:.2f}")
+    print(f"BTC adquirido: {btc_amount:.8f}")
+
+
+# =====================================
+# CERRAR OPERACION SIMULADA
+# =====================================
 
 def close_position(price):
 
@@ -135,22 +197,32 @@ def close_position(price):
 
     balance += amount * price
 
-    profit = amount * (price - position["entry"])
+    profit = amount * (
+        price - position["entry"]
+    )
 
     btc_balance -= amount
-    position = None
+
+    save_trade("SELL", price, amount, profit)
 
     print(f"VENTA SIMULADA: {price:.2f}")
     print(f"Resultado: {profit:.2f} USDT")
 
+    position = None
+
+
+# =====================================
+# EJECUCION PRINCIPAL
+# =====================================
 
 def run_bot():
 
-    global position
+    print("=" * 40)
+    print("AGENTE BTC - PAPER TRADING")
+    print("BINANCE - SOLO CONSULTA PUBLICA")
+    print("=" * 40)
 
-    print("AGENTE BTC INICIADO")
-    print("MODO PAPER TRADING")
-    print(f"Capital virtual: {INITIAL_BALANCE} USDT")
+    print(f"Capital inicial: {INITIAL_BALANCE} USDT")
 
     while True:
 
@@ -158,10 +230,8 @@ def run_bot():
 
             signal, price = analyze_market()
 
-            print(
-                f"BTC: {price:.2f} | "
-                f"Señal: {signal}"
-            )
+            print(f"\nBTC: {price:.2f}")
+            print(f"Senal: {signal}")
 
             if position is None:
 
@@ -175,18 +245,20 @@ def run_bot():
                     or price >= position["target"]
                     or signal == "SELL"
                 ):
+
                     close_position(price)
 
             equity = balance + btc_balance * price
 
-            print(f"Capital total: {equity:.2f} USDT")
-            print("-" * 40)
+            print(f"USDT disponible: {balance:.2f}")
+            print(f"BTC: {btc_balance:.8f}")
+            print(f"Capital total: {equity:.2f}")
 
             time.sleep(60)
 
         except Exception as error:
 
-            print(f"Error: {error}")
+            print(f"ERROR: {error}")
             time.sleep(30)
 
 
